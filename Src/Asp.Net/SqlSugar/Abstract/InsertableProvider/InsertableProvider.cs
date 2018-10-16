@@ -145,6 +145,10 @@ namespace SqlSugar
             IsAs = true;
             OldMappingTableList = this.Context.MappingTables;
             this.Context.MappingTables = this.Context.Utilities.TranslateCopy(this.Context.MappingTables);
+            if (this.Context.MappingTables.Any(it => it.EntityName == entityName))
+            {
+                this.Context.MappingTables.Add(this.Context.MappingTables.First(it => it.EntityName == entityName).DbTableName, tableName);
+            }
             this.Context.MappingTables.Add(entityName, tableName);
             return this; ;
         }
@@ -285,7 +289,7 @@ namespace SqlSugar
                     Value = column.Value,
                     DbColumnName = column.Key,
                     PropertyName = column.Key,
-                    PropertyType = UtilMethods.GetUnderType(column.Value.GetType()),
+                    PropertyType = column.Value == null? DBNull.Value.GetType(): UtilMethods.GetUnderType(column.Value.GetType()),
                     TableId = i
                 };
                 if (columnInfo.PropertyType.IsEnum())

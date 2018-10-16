@@ -23,6 +23,7 @@ namespace SqlSugar
         private List<string> IgnoreColumnNameList { get; set; }
         private List<string> WhereColumnList { get; set; }
         private bool IsOffIdentity { get; set; }
+        private bool IsVersionValidation { get; set; }
         public MappingTableList OldMappingTableList { get; set; }
         public bool IsAs { get; set; }
         public virtual int ExecuteCommand()
@@ -31,9 +32,11 @@ namespace SqlSugar
             AutoRemoveDataCache();
             Check.Exception(UpdateBuilder.WhereValues.IsNullOrEmpty() && GetPrimaryKeys().IsNullOrEmpty(), "You cannot have no primary key and no conditions");
             string sql = UpdateBuilder.ToSqlString();
+            ValidateVersion();
             RestoreMapping();
             return this.Ado.ExecuteCommand(sql, UpdateBuilder.Parameters == null ? null : UpdateBuilder.Parameters.ToArray());
         }
+
         public bool ExecuteCommandHasChange()
         {
             return this.ExecuteCommand() > 0;
@@ -64,12 +67,22 @@ namespace SqlSugar
             IsAs = true;
             OldMappingTableList = this.Context.MappingTables;
             this.Context.MappingTables = this.Context.Utilities.TranslateCopy(this.Context.MappingTables);
+            if (this.Context.MappingTables.Any(it => it.EntityName == entityName))
+            {
+                this.Context.MappingTables.Add(this.Context.MappingTables.First(it => it.EntityName == entityName).DbTableName, tableName);
+            }
             this.Context.MappingTables.Add(entityName, tableName);
             return this; ;
         }
         public IUpdateable<T> IgnoreColumns(Func<string, bool> ignoreColumMethod)
         {
             this.UpdateBuilder.DbColumnInfoList = this.UpdateBuilder.DbColumnInfoList.Where(it => !ignoreColumMethod(it.PropertyName)).ToList();
+            return this;
+        }
+
+        public IUpdateable<T> IsEnableUpdateVersionValidation()
+        {
+            this.IsVersionValidation = true;
             return this;
         }
 
@@ -280,7 +293,7 @@ namespace SqlSugar
                     Value = column.Value,
                     DbColumnName = column.Key,
                     PropertyName = column.Key,
-                    PropertyType = UtilMethods.GetUnderType(column.Value.GetType()),
+                    PropertyType = column.Value == null ? DBNull.Value.GetType() : UtilMethods.GetUnderType(column.Value.GetType()),
                     TableId = i
                 };
                 if (columnInfo.PropertyType.IsEnum())
@@ -449,6 +462,54 @@ namespace SqlSugar
             asyncUpdateableBuilder.IsOffIdentity = this.UpdateBuilder.IsOffIdentity;
             asyncUpdateableBuilder.SetValues = this.UpdateBuilder.SetValues;
             return asyncUpdateable;
+        }
+
+        private void ValidateVersion()
+        {
+            var versionColumn = this.EntityInfo.Columns.FirstOrDefault(it => it.IsEnableUpdateVersionValidation);
+            var pks = this.UpdateBuilder.DbColumnInfoList.Where(it => it.IsPrimarykey).ToList();
+            if (versionColumn != null && this.IsVersionValidation)
+            {
+                Check.Exception(pks.IsNullOrEmpty(), "UpdateVersionValidation the primary key is required.");
+                List<IConditionalModel> conModels = new List<IConditionalModel>();
+                foreach (var item in pks)
+                {
+                    conModels.Add(new ConditionalModel() { FieldName = item.DbColumnName, ConditionalType = ConditionalType.Equal, FieldValue = item.Value.ObjToString() });
+                }
+                var dbInfo = this.Context.Queryable<T>().Where(conModels).First();
+                if (dbInfo != null)
+                {
+                    var currentVersion = this.EntityInfo.Type.GetProperty(versionColumn.PropertyName).GetValue(UpdateObjs.Last(), null);
+                    var dbVersion = this.EntityInfo.Type.GetProperty(versionColumn.PropertyName).GetValue(dbInfo, null);
+                    Check.Exception(currentVersion == null, "UpdateVersionValidation entity property {0} is not null", versionColumn.PropertyName);
+                    Check.Exception(dbVersion == null, "UpdateVersionValidation database column {0} is not null", versionColumn.DbColumnName);
+                    if (versionColumn.PropertyInfo.PropertyType.IsIn(UtilConstants.IntType, UtilConstants.LongType))
+                    {
+                        if (Convert.ToInt64(dbVersion) > Convert.ToInt64(currentVersion))
+                        {
+                            throw new VersionExceptions(string.Format("UpdateVersionValidation {0} Not the latest version ", versionColumn.PropertyName));
+                        }
+                    }
+                    else if (versionColumn.PropertyInfo.PropertyType.IsIn(UtilConstants.DateType))
+                    {
+                        if (dbVersion.ObjToDate() > currentVersion.ObjToDate())
+                        {
+                            throw new VersionExceptions(string.Format("UpdateVersionValidation {0} Not the latest version ", versionColumn.PropertyName));
+                        }
+                    }
+                    else if (versionColumn.PropertyInfo.PropertyType.IsIn(UtilConstants.ByteArrayType))
+                    {
+                        if (UtilMethods.GetLong((byte[])dbVersion)>UtilMethods.GetLong((byte[])currentVersion))
+                        {
+                            throw new VersionExceptions(string.Format("UpdateVersionValidation {0} Not the latest version ", versionColumn.PropertyName));
+                        }
+                    }
+                    else
+                    {
+                        Check.ThrowNotSupportedException(string.Format("UpdateVersionValidation Not Supported Type [ {0} ] , {1}", versionColumn.PropertyInfo.PropertyType, versionColumn.PropertyName));
+                    }
+                }
+            }
         }
     }
 }
